@@ -1,0 +1,1 @@
+Since this is a 'uv' managed project, make sure you run "uv venv --seed" before you point VSCode to the .venv as the interpreter. Without this command, the .venv's "activate" script won't function the same as a .venv's script created through "python -m venv"
