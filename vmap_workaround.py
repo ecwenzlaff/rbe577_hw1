@@ -3,7 +3,7 @@
 # ecwenzlaff@wpi.edu
 
 from functools import wraps
-from typing import Any, Sequence, Callable # specified types (esp. those using "Any") primarily convey intention and are not guaranteed to work with static type checking libraries 
+from typing import Any, Sequence, Callable
 import torch
 from torch.overrides import TorchFunctionMode
 
