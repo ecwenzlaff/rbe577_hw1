@@ -9,6 +9,7 @@ import torch
 import vmap_workaround as vw
 import matplotlib.pyplot as plt
 import random
+import plot_utilities as util
 
 # Global Variables and Parameters:
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -95,11 +96,6 @@ def forcesToTorques(forcetensor: torch.FloatTensor) -> torch.FloatTensor:    # i
 
 # TODO: need to implement the Encoder/Decoder neural net architecture
 
-# TODO: need to incorporate a combination of sklearn's (installed via scikit-learn) train_test_split and pytorch's data loader to split 
-# generated sample data into (train, validation, test) sets and configure them for DNN training. I'm not sure yet whether I'm supposed to 
-# shuffle the data or not considering the fact that it was sampled via a random walk; but I'm currently thinking I should shuffle the
-# train and validation sets and leave the test set unshuffled. 
-
 if __name__ == '__main__':
     print(f"Python Version = {sys.version}, Torch Device = {device}")
     # Generate datasets:
@@ -125,58 +121,42 @@ if __name__ == '__main__':
     T_test = torch.tensor(T_test, dtype=torch.float32).to(device)
     T_train = T_train[:, torch.randperm(T_train.shape[1])]  # only shuffle the training data
 
-    # Plot everything:
-    F1_samples = test_tensor.cpu().detach().numpy()[0,:].reshape(-1,1)#[0:300,:]
-    F2_samples = test_tensor.cpu().detach().numpy()[1,:].reshape(-1,1)#[0:300,:]
-    F3_samples = test_tensor.cpu().detach().numpy()[2,:].reshape(-1,1)#[0:300,:]
-    alpha2_samples = test_tensor.cpu().detach().numpy()[3,:].reshape(-1,1)#[0:300,:]
-    alpha3_samples = test_tensor.cpu().detach().numpy()[4,:].reshape(-1,1)#[0:300,:]
-    tau1_samples = torque_tensor.cpu().detach().numpy()[0,:].reshape(-1,1)#[0:300,:]
-    tau2_samples = torque_tensor.cpu().detach().numpy()[1,:].reshape(-1,1)#[0:300,:]
-    tau3_samples = torque_tensor.cpu().detach().numpy()[2,:].reshape(-1,1)#[0:300,:]
-    train_samples = T_train.cpu().detach().numpy()
-    validate_samples = T_validation.cpu().detach().numpy()
-    test_samples = T_test.cpu().detach().numpy()
-    fig_F1, ax_F1 = plt.subplots(1,1)
-    fig_F2, ax_F2 = plt.subplots(1,1)
-    fig_F3, ax_F3 = plt.subplots(1,1)
-    fig_alpha2, ax_alpha2 = plt.subplots(1,1)
-    fig_alpha3, ax_alpha3 = plt.subplots(1,1)
-    fig_tau1, ax_tau1 = plt.subplots(1,1)
-    fig_tau2, ax_tau2 = plt.subplots(1,1)
-    fig_tau3, ax_tau3 = plt.subplots(1,1)
-    fig_train, ax_train = plt.subplots(1,1)
-    fig_validate, ax_validate = plt.subplots(1,1)
-    fig_test, ax_test = plt.subplots(1,1)
-    ax_F1.plot(np.arange(F1_samples.shape[0]), F1_samples, '.-')
-    ax_F1.set_title("F1")
-    ax_F2.plot(np.arange(F2_samples.shape[0]), F2_samples, '.-')
-    ax_F2.set_title("F2")
-    ax_F3.plot(np.arange(F3_samples.shape[0]), F3_samples, '.-')
-    ax_F3.set_title("F3")
-    ax_alpha2.plot(np.arange(alpha2_samples.shape[0]), alpha2_samples, '.-')
-    ax_alpha2.set_title("Alpha2")
-    ax_alpha3.plot(np.arange(alpha3_samples.shape[0]), alpha3_samples, '.-')
-    ax_alpha3.set_title("Alpha3")
-    ax_tau1.plot(np.arange(tau1_samples.shape[0]), tau1_samples, '.-')
-    ax_tau1.set_title("Tau1")
-    ax_tau2.plot(np.arange(tau2_samples.shape[0]), tau2_samples, '.-')
-    ax_tau2.set_title("Tau2")
-    ax_tau3.plot(np.arange(tau3_samples.shape[0]), tau3_samples, '.-')
-    ax_tau3.set_title("Tau3")
-    ax_train.plot(np.arange(train_samples.shape[1]), train_samples[0,:], label="Tau1")
-    ax_train.plot(np.arange(train_samples.shape[1]), train_samples[1,:], label="Tau2")
-    #ax_train.plot(np.arange(train_samples.shape[1]), train_samples[2,:], label="Tau3")
-    ax_train.legend()
-    ax_train.set_title("Training Set")
-    ax_validate.plot(np.arange(validate_samples.shape[1]), validate_samples[0,:], label="Tau1")
-    ax_validate.plot(np.arange(validate_samples.shape[1]), validate_samples[1,:], label="Tau2")
-    ax_validate.plot(np.arange(validate_samples.shape[1]), validate_samples[2,:], label="Tau3")
-    ax_validate.legend()
-    ax_validate.set_title("Validation Set")
-    ax_test.plot(np.arange(test_samples.shape[1]), test_samples[0,:], label="Tau1")
-    ax_test.plot(np.arange(test_samples.shape[1]), test_samples[1,:], label="Tau2")
-    ax_test.plot(np.arange(test_samples.shape[1]), test_samples[2,:], label="Tau3")
-    ax_test.legend()
-    ax_test.set_title("Test Set")
+    # Create LineStructures for plotting:
+    F1_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[0,:].reshape(-1,1), marker='.') 
+    F2_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[1,:].reshape(-1,1), marker='.')
+    F3_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[2,:].reshape(-1,1), marker='.')
+    alpha2_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[3,:].reshape(-1,1), marker='.')
+    alpha3_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[4,:].reshape(-1,1), marker='.')
+    tau1_samples = util.LineStructure(x=np.arange(0,torque_tensor.shape[1]), y=torque_tensor.cpu().detach().numpy()[0,:].reshape(-1,1))
+    tau2_samples = util.LineStructure(x=np.arange(0,torque_tensor.shape[1]), y=torque_tensor.cpu().detach().numpy()[1,:].reshape(-1,1))
+    tau3_samples = util.LineStructure(x=np.arange(0,torque_tensor.shape[1]), y=torque_tensor.cpu().detach().numpy()[2,:].reshape(-1,1))
+    train_samples_tau1 = util.LineStructure(x=np.arange(0,T_train.shape[1]), y=T_train.cpu().detach().numpy()[0,:], label="Tau1")
+    train_samples_tau2 = util.LineStructure(x=np.arange(0,T_train.shape[1]), y=T_train.cpu().detach().numpy()[1,:], label="Tau2")
+    train_samples_tau3 = util.LineStructure(x=np.arange(0,T_train.shape[1]), y=T_train.cpu().detach().numpy()[2,:], label="Tau3")
+    validate_samples_tau1 = util.LineStructure(x=np.arange(0,T_validation.shape[1]), y=T_validation.cpu().detach().numpy()[0,:], label="Tau1")
+    validate_samples_tau2 = util.LineStructure(x=np.arange(0,T_validation.shape[1]), y=T_validation.cpu().detach().numpy()[1,:], label="Tau2")
+    validate_samples_tau3 = util.LineStructure(x=np.arange(0,T_validation.shape[1]), y=T_validation.cpu().detach().numpy()[2,:], label="Tau3")
+    test_samples_tau1 = util.LineStructure(x=np.arange(0,T_test.shape[1]), y=T_test.cpu().detach().numpy()[0,:], label="Tau1")
+    test_samples_tau2 = util.LineStructure(x=np.arange(0,T_test.shape[1]), y=T_test.cpu().detach().numpy()[1,:], label="Tau2")
+    test_samples_tau3 = util.LineStructure(x=np.arange(0,T_test.shape[1]), y=T_test.cpu().detach().numpy()[2,:], label="Tau3")
+
+    # Generate plots:
+    fig_F1, ax_F1 = util.plotLineStructures([F1_samples], supertitle="F1")[0:2]
+    fig_F2, ax_F2 = util.plotLineStructures([F2_samples], supertitle="F2")[0:2]
+    fig_F3, ax_F3 = util.plotLineStructures([F3_samples], supertitle="F3")[0:2]
+    fig_a2, ax_a2 = util.plotLineStructures([alpha2_samples], supertitle="alpha2")[0:2]
+    fig_a3, ax_a3 = util.plotLineStructures([alpha3_samples], supertitle="alpha3")[0:2]
+    fig_tau1, ax_tau1 = util.plotLineStructures([tau1_samples], supertitle="Tau1")[0:2]
+    fig_tau2, ax_tau2 = util.plotLineStructures([tau2_samples], supertitle="Tau2")[0:2]
+    fig_tau3, ax_tau3 = util.plotLineStructures([tau3_samples], supertitle="Tau3")[0:2]
+    fig_train, ax_train = util.plotLineStructures([train_samples_tau1], supertitle="Train")[0:2]
+    fig_train, ax_train = util.plotLineStructures([train_samples_tau2], supertitle="Train", fig=fig_train, ax=ax_train)[0:2]
+    fig_train, ax_train = util.plotLineStructures([train_samples_tau3], supertitle="Train", fig=fig_train, ax=ax_train)[0:2]
+    fig_val, ax_val = util.plotLineStructures([validate_samples_tau1], supertitle="Validation")[0:2]
+    fig_val, ax_val = util.plotLineStructures([validate_samples_tau2], supertitle="Validation", fig=fig_val, ax=ax_val)[0:2]
+    fig_val, ax_val = util.plotLineStructures([validate_samples_tau3], supertitle="Validation", fig=fig_val, ax=ax_val)[0:2]
+    fig_test, ax_test = util.plotLineStructures([test_samples_tau1], supertitle="Test")[0:2]
+    fig_test, ax_test = util.plotLineStructures([test_samples_tau2], supertitle="Test", fig=fig_test, ax=ax_test)[0:2]
+    fig_test, ax_test = util.plotLineStructures([test_samples_tau3], supertitle="Test", fig=fig_test, ax=ax_test)[0:2]
+
     plt.show()
