@@ -24,7 +24,7 @@ class LineStructure:
             self.markerfacecolor = self.color
 
 def plotLineStructures(lslist: List[LineStructure], 
-                       splitview: bool = False,     # NOTE: splitview and len(lslist) are closely linked. So if len(lslist) > 1, then splitview should be "True"
+                       splitview: Tuple[int, int] = (1,1),
                        supertitle: str = None, 
                        xlabels: List[str] = None,   # should have the same length as lslist
                        ylabels: List[str] = None,   # should have the same length as lslist
@@ -34,34 +34,33 @@ def plotLineStructures(lslist: List[LineStructure],
                        fig: plt.Figure = None, 
                        ax: plt.Axes = None) -> Tuple[plt.Figure, plt.Axes, List[plt.Line2D]]:
     # Before doing anything, figure out what type of subplots to do:
-    if (not splitview):
-        sizetuple = None #(8,7)
-        subplotnum = 1
-    else:
-        sizetuple = None #(14,5)
-        subplotnum = len(lslist)
+    sptuples = []
+    subplotnums = np.zeros((len(lslist),))
+    if (max(splitview) > 1):
+        subplotnums = np.arange(0, len(lslist))
+    for i in range(0, len(lslist)):
+        sptuples.append((subplotnums[i], lslist[i]))
     projectview = None
     if any([(not (ls.z is None)) for ls in lslist]):
         projectview='3d'
     if ((fig is None) or (ax is None)):
         # Need to avoid using "add_subplot()" method in the loop below to avoid overwriting passed in plt.Axes objects.
         # Also, need to use 'subplot_kw' since "projection=" syntax only applies to "add_subplot()" method:
-        fig, ax = plt.subplots(1, subplotnum, layout="tight", figsize=sizetuple, subplot_kw={"projection": projectview}) 
+        fig, ax = plt.subplots(max(splitview[0],1), max(splitview[1],1), layout="tight", subplot_kw={"projection": projectview}) 
     linehandles = []
     # Add supertitle if one is specified:
     if (supertitle != None):
         fig.suptitle(supertitle, fontweight='bold')
     anylabels = False
-    for i in range(0, subplotnum):
-        curr_ls = lslist[i]
+    for ax_idx, curr_ls in sptuples:
         threeDplot = False
         anylabels = (anylabels or (curr_ls.label != None))
         if (curr_ls.z is not None): 
             # since curr_ls.z will either be "None" or an np.ndarray, "!=" won't work since 
             # that operator checks on value instead of identity
              threeDplot = True
-        if (splitview):
-            axref = ax[i]
+        if (max(splitview) > 1):
+            axref = ax.reshape(-1)[int(ax_idx)] # plt.Axes objects are only subscriptable if multiple columns and/or rows are specified at subplot initilialization
         else:
             axref = ax
         # Plot the data for the current line structure:

@@ -149,14 +149,8 @@ if __name__ == '__main__':
     fig_tau1, ax_tau1 = util.plotLineStructures([tau1_samples], supertitle="Tau1")[0:2]
     fig_tau2, ax_tau2 = util.plotLineStructures([tau2_samples], supertitle="Tau2")[0:2]
     fig_tau3, ax_tau3 = util.plotLineStructures([tau3_samples], supertitle="Tau3")[0:2]
-    fig_train, ax_train = util.plotLineStructures([train_samples_tau1], supertitle="Train")[0:2]
-    fig_train, ax_train = util.plotLineStructures([train_samples_tau2], supertitle="Train", fig=fig_train, ax=ax_train)[0:2]
-    fig_train, ax_train = util.plotLineStructures([train_samples_tau3], supertitle="Train", fig=fig_train, ax=ax_train)[0:2]
-    fig_val, ax_val = util.plotLineStructures([validate_samples_tau1], supertitle="Validation")[0:2]
-    fig_val, ax_val = util.plotLineStructures([validate_samples_tau2], supertitle="Validation", fig=fig_val, ax=ax_val)[0:2]
-    fig_val, ax_val = util.plotLineStructures([validate_samples_tau3], supertitle="Validation", fig=fig_val, ax=ax_val)[0:2]
-    fig_test, ax_test = util.plotLineStructures([test_samples_tau1], supertitle="Test")[0:2]
-    fig_test, ax_test = util.plotLineStructures([test_samples_tau2], supertitle="Test", fig=fig_test, ax=ax_test)[0:2]
-    fig_test, ax_test = util.plotLineStructures([test_samples_tau3], supertitle="Test", fig=fig_test, ax=ax_test)[0:2]
+    fig_train, ax_train = util.plotLineStructures([train_samples_tau1, train_samples_tau2, train_samples_tau3], supertitle="Train", splitview=(3,1))[0:2]
+    fig_val, ax_val = util.plotLineStructures([validate_samples_tau1, validate_samples_tau2, validate_samples_tau3], supertitle="Validation")[0:2]
+    fig_test, ax_test = util.plotLineStructures([test_samples_tau1, test_samples_tau2, test_samples_tau3], supertitle="Test")[0:2]
 
     plt.show()
