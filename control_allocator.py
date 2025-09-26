@@ -3,9 +3,10 @@
 # ecwenzlaff@wpi.edu
 
 import sys
-from typing import Any, Tuple # specified types (esp. those using "Any") primarily convey intention and are not guaranteed to work with static type checking libraries 
+from typing import Any, Tuple, Union # specified types (esp. those using "Any") primarily convey intention and are not guaranteed to work with static type checking libraries 
 import numpy as np
 import torch
+import torch.nn as nn
 import vmap_workaround as vw
 import matplotlib.pyplot as plt
 import random
@@ -94,7 +95,108 @@ def forcesToTorques(forcetensor: torch.FloatTensor) -> torch.FloatTensor:    # i
     #torque_tensor = torch.stack([transform_tensor[i,:,:] @ forcetensor[:,i] for i in range(0,forcetensor.shape[1])]).T[0:3,:].to(device)
     return torque_tensor[:,0:3,0].T
 
-# TODO: need to implement the Encoder/Decoder neural net architecture
+def splitTrainValTest(dataset: np.ndarray, 
+             slicepoints: Union[Tuple[float] | Tuple[float, float]], 
+             shuffleset: Union[Tuple[bool, bool] | Tuple[bool, bool, bool]],
+             sliceaxis: int = 1) -> Union[Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    slicelist = []
+    for val in slicepoints:
+        slicelist.append(int(val*dataset.shape[sliceaxis]))
+    if (len(slicepoints)==2) and (len(shuffleset)==3):
+        trainset, validationset, testset = np.split(dataset, slicelist, axis=sliceaxis)
+        trainset = torch.tensor(trainset, dtype=torch.float32).to(device)
+        validationset = torch.tensor(validationset, dtype=torch.float32).to(device)
+        testset = torch.tensor(testset, dtype=torch.float32).to(device)
+        if (shuffleset[0]):
+            trainset = trainset[:, torch.randperm(trainset.shape[sliceaxis])]
+        if (shuffleset[1]):
+            validationset = validationset[:, torch.randperm(validationset.shape[sliceaxis])]
+        if (shuffleset[2]):
+            testset = testset[:, torch.randperm(testset.shape[sliceaxis])]
+        return trainset, validationset, testset
+    elif ((len(slicepoints)==1) and (len(shuffleset)==2)):
+        trainset, testset = np.split(dataset, slicelist, axis=sliceaxis)
+        trainset = torch.tensor(trainset, dtype=torch.float32).to(device)
+        testset = torch.tensor(testset, dtype=torch.float32).to(device)
+        if (shuffleset[0]):
+            trainset = trainset[:, torch.randperm(trainset.shape[sliceaxis])]
+        if (shuffleset[1]):
+            testset = testset[:, torch.randperm(testset.shape[sliceaxis])]
+        return trainset, testset
+    else:
+        raise(f"splitTVT error - invalid combination of tuple sizes: {len(slicepoints)=}, {len(shuffleset)=}")
+
+# TODO: turns out we don't need to implement an autoencoder with LSTMs like the paper described, so you'll need to implement 
+# an autoencoder purely made up of Fully Connected Neural Networks instead (AutoEncoder_FCN) 
+class AutoEncoder_LSTM(nn.Module):
+    def __init__(self, lstm_nodes: int = 64, lstm_layers: int = 2, net_dropout: float = 0.0):
+        super(AutoEncoder_LSTM, self).__init__()
+        self.hidden_size = int(lstm_nodes/lstm_layers)
+        self.lstm_layers = lstm_layers
+        self.encoder_lstm = nn.LSTM(input_size=3, hidden_size=self.hidden_size, num_layers=lstm_layers, dropout=net_dropout).to(device)
+        self.encoder_linear = nn.Sequential(
+            nn.Linear(self.hidden_size, 5), 
+            nn.Dropout(net_dropout)
+        ).to(device)
+        self.decoder_lstm = nn.LSTM(input_size=5, hidden_size=self.hidden_size, num_layers=lstm_layers, dropout=net_dropout).to(device)
+        self.decoder_linear = nn.Sequential(
+            nn.Linear(self.hidden_size, 3),
+            nn.Dropout(net_dropout)
+        ).to(device)
+    def encode(self, generaltorques: torch.FloatTensor):
+        # NOTE: generaltorques dimension should be (N-by-D) here, where:
+        #   N = number of samples (number of batches)
+        #   D = torque vector dimension (number of state variables)
+        # 
+        # As part of the forward processing, the 2D input tensor will be expanded
+        # to 3D in order to pass it into the LSTM; since conceptually, the (N-by-D) tensor
+        # could be interpretted as N (1-by-D) tensors.
+        gt3d = generaltorques.reshape(1, generaltorques.shape[0], generaltorques.shape[1])
+        init_hidden_state = torch.zeros((self.lstm_layers, gt3d.shape[1], self.hidden_size), dtype=torch.float32).to(device)
+        init_cell_state = torch.zeros((self.lstm_layers, gt3d.shape[1], self.hidden_size), dtype=torch.float32).to(device)
+        lstm_output, lstm_states = self.encoder_lstm(gt3d, (init_hidden_state, init_cell_state))
+        linear_out = self.encoder_linear(lstm_output[-1,:,:])
+        return linear_out
+    def decode(self, generalforces: torch.FloatTensor):
+        # NOTE: generalforces dimension should be (N-by-D) here, where:
+        #   N = number of samples (number of batches)
+        #   D = force vector dimension (number of state variables)
+        # 
+        # As part of the forward processing, the 2D input tensor will be expanded
+        # to 3D in order to pass it into the LSTM; since conceptually, the (N-by-D) tensor
+        # could be interpretted as N (1-by-D) tensors.
+        gf3d = generalforces.reshape(1, generalforces.shape[0], generalforces.shape[1])
+        init_hidden_state = torch.zeros((self.lstm_layers, gf3d.shape[1], self.hidden_size), dtype=torch.float32).to(device)
+        init_cell_state = torch.zeros((self.lstm_layers, gf3d.shape[1], self.hidden_size), dtype=torch.float32).to(device)
+        lstm_output, lstm_states = self.decoder_lstm(gf3d, (init_hidden_state, init_cell_state))  
+        linear_out = self.decoder_linear(lstm_output[-1,:,:])
+        return linear_out
+    def forward(self, generaltorques: torch.FloatTensor) -> torch.FloatTensor:
+        # NOTE: generaltorques dimension should be (N-by-D) here, where:
+        #   N = number of samples (number of batches)
+        #   D = torque vector dimension (number of state variables)
+        # 
+        # As part of each component's respective forward processing, the 2D input tensor 
+        # will be expanded to 3D in order to pass it into their respective LSTMs.
+        allocatedforces = self.encode(generaltorques)
+        decodedtorques = self.decode(allocatedforces)
+        return decodedtorques
+
+# TODO: Need to incorporate the loss functions described in the paper and then stitch them into a pytorch optimizer
+def compute_L1():
+    pass
+    
+def compute_L2():
+    pass
+
+def compute_L3():
+    pass
+    
+def compute_L4():
+    pass
+    
+def compute_L5():
+    pass
 
 if __name__ == '__main__':
     print(f"Python Version = {sys.version}, Torch Device = {device}")
@@ -110,17 +212,15 @@ if __name__ == '__main__':
             random.uniform(alpha3_bounds[0], alpha3_bounds[1])
         ]).reshape(-1)).to(device)
     torque_tensor = forcesToTorques(test_tensor)
-    T_train, T_validation, T_test = np.split(torque_tensor.cpu().detach().numpy(), 
-                                                [
-                                                    int(0.7*torque_tensor.shape[1]),    # first split: train = 0->70%
-                                                    int(0.8*torque_tensor.shape[1]),    # second split: validation = 70->80%, test = 80->100%
-                                                ], axis=1)
-    # TODO: might be beneficial to port this splitting code into a function:
-    T_train = torch.tensor(T_train, dtype=torch.float32).to(device)
-    T_validation = torch.tensor(T_validation, dtype=torch.float32).to(device)
-    T_test = torch.tensor(T_test, dtype=torch.float32).to(device)
-    T_train = T_train[:, torch.randperm(T_train.shape[1])]  # only shuffle the training data
+    T_train, T_validation, T_test = splitTrainValTest(torque_tensor.cpu().detach().numpy(), (0.7, 0.8), (True, False, False), 1)
+    
+    # Configure the NN model:
+    model = AutoEncoder_LSTM()
+    print(f"{model.encode(T_train[:,0:10].T) = }")
+    print(f"{model.decode(test_tensor[:,0:10].T) = }")
+    print(f"{model(T_train[:,0:10].T) = }")
 
+    """
     # Create LineStructures for plotting:
     F1_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[0,:].reshape(-1,1), marker='.') 
     F2_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[1,:].reshape(-1,1), marker='.')
@@ -141,16 +241,17 @@ if __name__ == '__main__':
     test_samples_tau3 = util.LineStructure(x=np.arange(0,T_test.shape[1]), y=T_test.cpu().detach().numpy()[2,:], label="Tau3")
 
     # Generate plots:
-    fig_F1, ax_F1 = util.plotLineStructures([F1_samples], supertitle="F1")[0:2]
-    fig_F2, ax_F2 = util.plotLineStructures([F2_samples], supertitle="F2")[0:2]
-    fig_F3, ax_F3 = util.plotLineStructures([F3_samples], supertitle="F3")[0:2]
-    fig_a2, ax_a2 = util.plotLineStructures([alpha2_samples], supertitle="alpha2")[0:2]
-    fig_a3, ax_a3 = util.plotLineStructures([alpha3_samples], supertitle="alpha3")[0:2]
-    fig_tau1, ax_tau1 = util.plotLineStructures([tau1_samples], supertitle="Tau1")[0:2]
-    fig_tau2, ax_tau2 = util.plotLineStructures([tau2_samples], supertitle="Tau2")[0:2]
-    fig_tau3, ax_tau3 = util.plotLineStructures([tau3_samples], supertitle="Tau3")[0:2]
-    fig_train, ax_train = util.plotLineStructures([train_samples_tau1, train_samples_tau2, train_samples_tau3], supertitle="Train", splitview=(3,1))[0:2]
-    fig_val, ax_val = util.plotLineStructures([validate_samples_tau1, validate_samples_tau2, validate_samples_tau3], supertitle="Validation")[0:2]
-    fig_test, ax_test = util.plotLineStructures([test_samples_tau1, test_samples_tau2, test_samples_tau3], supertitle="Test")[0:2]
+    fig_F1, ax_F1, _ = util.plotLineStructures([F1_samples], supertitle="F1")
+    fig_F2, ax_F2, _ = util.plotLineStructures([F2_samples], supertitle="F2")
+    fig_F3, ax_F3, _ = util.plotLineStructures([F3_samples], supertitle="F3")
+    fig_a2, ax_a2, _ = util.plotLineStructures([alpha2_samples], supertitle="alpha2")
+    fig_a3, ax_a3, _ = util.plotLineStructures([alpha3_samples], supertitle="alpha3")
+    fig_tau1, ax_tau1, _ = util.plotLineStructures([tau1_samples], supertitle="Tau1")
+    fig_tau2, ax_tau2, _ = util.plotLineStructures([tau2_samples], supertitle="Tau2")
+    fig_tau3, ax_tau3, _ = util.plotLineStructures([tau3_samples], supertitle="Tau3")
+    fig_train, ax_train, _ = util.plotLineStructures([train_samples_tau1, train_samples_tau2, train_samples_tau3], supertitle="Train", splitview=(3,1))
+    fig_val, ax_val, _ = util.plotLineStructures([validate_samples_tau1, validate_samples_tau2, validate_samples_tau3], supertitle="Validation")
+    fig_test, ax_test, _ = util.plotLineStructures([test_samples_tau1, test_samples_tau2, test_samples_tau3], supertitle="Test")
+    """
 
     plt.show()
