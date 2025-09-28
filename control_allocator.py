@@ -7,10 +7,12 @@ from typing import Any, Tuple, Union # specified types (esp. those using "Any") 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import vmap_workaround as vw
 import matplotlib.pyplot as plt
 import random
 import plot_utilities as util
+import copy
 
 # Global Variables and Parameters:
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -20,6 +22,9 @@ F3_bounds = (-5e3, 5e3)
 alpha2_bounds = (-180.0, 180.0)
 alpha3_bounds = (-180.0, 180.0)
 l1, l2, l3, l4 = -14.0, 14.5, -2.7, 2.7
+cmd_max = (3e4, 6e4, 6e4, 180.0, 180.0)
+bad_az_bottom, bad_az_top = (-100.0, -80.0), (80.0, 100.0)
+k0, k1, k2, k4, k5 = 10e0, 10e0, 10e-1, 10e-7, 10e-1    # k3 not included since it's associated with loss function for rate changes which don't apply to this sample set
 
 def randomWalkTensor(tensorsize: Tuple[int, int], maxstepvector: torch.FloatTensor, initstate: torch.Tensor = None) -> torch.FloatTensor:
     # Input/output formatting anticipates state variables in rows and sampled states in columns:
@@ -67,7 +72,6 @@ def clampSamples(stepwalktensor: torch.FloatTensor, distancetensor: torch.FloatT
 
 def forcesToTorques(forcetensor: torch.FloatTensor) -> torch.FloatTensor:    # input dimensions: [5,N], output dimensions: [3,N]
     transform_tensor = torch.zeros((forcetensor.shape[1],5,5), dtype=torch.float32).to(device)
-    #torque_tensor = torch.zeros((5,forcetensor.shape[1]), dtype=torch.float32).to(device)
     # Each 5x5xi slice should align with the torque transform in section 3.1. So when the 3x3
     # matrix given by equation (6) is expanded to apply to all 5 input commands, the individual
     # transform for a single set of five input commands becomes:
@@ -91,7 +95,7 @@ def forcesToTorques(forcetensor: torch.FloatTensor) -> torch.FloatTensor:    # i
     # torque_tensor = (transform_tensor @ forcetensor)[0,0:3,0:3] 
     def inplacetransform(i: torch.Tensor) -> torch.Tensor:
         return torch.matmul(transform_tensor[i,:,:], forcetensor[:,i])
-    torque_tensor = vw.vmap(inplacetransform)(torch.arange(0,forcetensor.shape[1])).to(device)
+    torque_tensor = (vw.vmap(inplacetransform)(torch.arange(0,forcetensor.shape[1]))).to(device)
     #torque_tensor = torch.stack([transform_tensor[i,:,:] @ forcetensor[:,i] for i in range(0,forcetensor.shape[1])]).T[0:3,:].to(device)
     return torque_tensor[:,0:3,0].T
 
@@ -124,27 +128,19 @@ def splitTrainValTest(dataset: np.ndarray,
             testset = testset[:, torch.randperm(testset.shape[sliceaxis])]
         return trainset, testset
     else:
-        raise(f"splitTVT error - invalid combination of tuple sizes: {len(slicepoints)=}, {len(shuffleset)=}")
+        raise(f"splitTrainValTest error - invalid combination of tuple sizes: {len(slicepoints)=}, {len(shuffleset)=}")
 
-# TODO: turns out we don't need to implement an autoencoder with LSTMs like the paper described, so you'll need to implement 
-# an autoencoder purely made up of Fully Connected Neural Networks instead (AutoEncoder_FCN) 
 class AutoEncoder_LSTM(nn.Module):
     def __init__(self, lstm_nodes: int = 64, lstm_layers: int = 2, net_dropout: float = 0.0):
         super(AutoEncoder_LSTM, self).__init__()
         self.hidden_size = int(lstm_nodes/lstm_layers)
         self.lstm_layers = lstm_layers
         self.encoder_lstm = nn.LSTM(input_size=3, hidden_size=self.hidden_size, num_layers=lstm_layers, dropout=net_dropout).to(device)
-        self.encoder_linear = nn.Sequential(
-            nn.Linear(self.hidden_size, 5), 
-            nn.Dropout(net_dropout)
-        ).to(device)
+        self.encoder_linear = nn.Linear(self.hidden_size, 5).to(device)
         self.decoder_lstm = nn.LSTM(input_size=5, hidden_size=self.hidden_size, num_layers=lstm_layers, dropout=net_dropout).to(device)
-        self.decoder_linear = nn.Sequential(
-            nn.Linear(self.hidden_size, 3),
-            nn.Dropout(net_dropout)
-        ).to(device)
+        self.decoder_linear = nn.Linear(self.hidden_size, 3).to(device)
     def encode(self, generaltorques: torch.FloatTensor):
-        # NOTE: generaltorques dimension should be (N-by-D) here, where:
+        # generaltorques dimension should be (N-by-D) here, where:
         #   N = number of samples (number of batches)
         #   D = torque vector dimension (number of state variables)
         # 
@@ -158,7 +154,7 @@ class AutoEncoder_LSTM(nn.Module):
         linear_out = self.encoder_linear(lstm_output[-1,:,:])
         return linear_out
     def decode(self, generalforces: torch.FloatTensor):
-        # NOTE: generalforces dimension should be (N-by-D) here, where:
+        # generalforces dimension should be (N-by-D) here, where:
         #   N = number of samples (number of batches)
         #   D = force vector dimension (number of state variables)
         # 
@@ -172,7 +168,7 @@ class AutoEncoder_LSTM(nn.Module):
         linear_out = self.decoder_linear(lstm_output[-1,:,:])
         return linear_out
     def forward(self, generaltorques: torch.FloatTensor) -> torch.FloatTensor:
-        # NOTE: generaltorques dimension should be (N-by-D) here, where:
+        # generaltorques dimension should be (N-by-D) here, where:
         #   N = number of samples (number of batches)
         #   D = torque vector dimension (number of state variables)
         # 
@@ -181,24 +177,158 @@ class AutoEncoder_LSTM(nn.Module):
         allocatedforces = self.encode(generaltorques)
         decodedtorques = self.decode(allocatedforces)
         return decodedtorques
-
-# TODO: Need to incorporate the loss functions described in the paper and then stitch them into a pytorch optimizer
-def compute_L1():
-    pass
     
-def compute_L2():
-    pass
+class AutoEncoder_FCN(nn.Module):
+    def __init__(self, layer_outputs: Tuple[int, int], net_dropout: float = 0.0):
+        super(AutoEncoder_FCN, self).__init__()
+        # Since the encoder/decoders are constrained to 3 layers, with a final number 
+        # of outputs fixed at 5, the layer_outputs Tuple should always contain two components 
+        # ordered for the encoder's hidden layer output sequence (the decoder's hidden layer 
+        # output sequence will be the inverse of the encoder layer):
+        self.encoder_fcn = nn.Sequential(
+            # Input Layer:
+            nn.Linear(3, layer_outputs[0]), 
+            nn.ReLU(),
+            nn.Dropout(net_dropout),
+            # Hidden Layer:
+            nn.Linear(layer_outputs[0], layer_outputs[1]),
+            nn.ReLU(),
+            nn.Dropout(net_dropout),
+            # Output Layer:
+            nn.Linear(layer_outputs[1], 5)
+        ).to(device)
+        self.decoder_fcn = nn.Sequential(
+            # Input Layer:
+            nn.Linear(5, layer_outputs[1]), 
+            nn.ReLU(),
+            nn.Dropout(net_dropout),
+            # Hidden Layer:
+            nn.Linear(layer_outputs[1], layer_outputs[0]),
+            nn.ReLU(),
+            nn.Dropout(net_dropout),
+            # Output Layer:
+            nn.Linear(layer_outputs[0], 3)
+        ).to(device)
+    def encode(self, generaltorques: torch.FloatTensor) -> torch.FloatTensor:
+        return self.encoder_fcn(generaltorques)
+    def decode(self, generalforces: torch.FloatTensor) -> torch.FloatTensor:
+        return self.decoder_fcn(generalforces)
+    def forward(self, generaltorques: torch.FloatTensor) -> torch.FloatTensor:
+        allocatedforces = self.encode(generaltorques)
+        decodedtorques = self.decode(allocatedforces)
+        return decodedtorques
+
+def compute_L0(true_torques: torch.FloatTensor, encoder_forces: torch.FloatTensor) -> torch.FloatTensor:
+    # This loss function is meant to minimize error between the motion controller's requested torques 
+    # and the encoder's commanded generalized forces (after they've been transformed into torques). 
+    # true_torques and encoder_forces tensors are expected to have each row represent a unique state 
+    # (so that individual vector components have their own column spanning rows equal to the number of 
+    # samples to evaluate); so true_torques should be N-by-3, and encoder_forces should be N-by-5:
+    transform_tensor = torch.zeros((encoder_forces.shape[0],5,5), dtype=torch.float32).to(device)
+    # Just like the forcesToTorques() function, the transform from section 3.1, equation (6) will be used. 
+    # However, unlike the forcesToTorques() function, the transform is needed to convert from torques
+    # to forces, so a matrix inverse operation must take place (a Moore-Penrose psuedo-inverse matrix 
+    # operation is actually used instead for preventing exceptions raised by singular matrices): 
+    transform_tensor[:,0,1] = torch.cos((np.pi/180)*encoder_forces[:,3].reshape(-1))
+    transform_tensor[:,0,2] = torch.cos((np.pi/180)*encoder_forces[:,4].reshape(-1))
+    transform_tensor[:,1,0] = 1.0
+    transform_tensor[:,1,1] = torch.sin((np.pi/180)*encoder_forces[:,3].reshape(-1))
+    transform_tensor[:,1,2] = torch.sin((np.pi/180)*encoder_forces[:,4].reshape(-1))
+    transform_tensor[:,2,0] = l2
+    transform_tensor[:,2,1] = l1*torch.sin((np.pi/180)*encoder_forces[:,3].reshape(-1)) - l3*torch.cos((np.pi/180)*encoder_forces[:,3].reshape(-1))
+    transform_tensor[:,2,2] = l1*torch.sin((np.pi/180)*encoder_forces[:,4].reshape(-1)) - l4*torch.cos((np.pi/180)*encoder_forces[:,4].reshape(-1))
+    def inplacetransform(i: torch.Tensor) -> torch.Tensor:
+        return torch.matmul(torch.linalg.pinv(transform_tensor[i,:,:]), encoder_forces[i,:])    # using torch.linalg.pinv() instead of torch.inverse()
+    encoder_torques = (vw.vmap(inplacetransform)(torch.arange(0,encoder_forces.shape[0]))).to(device)
+    error_tensor = (true_torques - encoder_torques[:,0:3]).to(device)
+    def MSE(i: torch.Tensor) -> torch.Tensor:
+        return torch.mean(error_tensor[i,:]**2)
+    mse_tensor = (vw.vmap(MSE)(torch.arange(0,error_tensor.shape[0]))).to(device)   # this should yield a 1 dimensional tensor
+    return mse_tensor
+
+def compute_L1(true_torques: torch.FloatTensor, decoder_torques: torch.FloatTensor) -> torch.FloatTensor:
+    # This loss function is meant to minimize error between the motion controller's requested torques 
+    # and the decoded commanded torques output from the control allocator. true_torques and decoder_forces 
+    # tensors are expected to have each row represent a unique state (so that individual vector components 
+    # have their own column spanning rows equal to the number of samples to evaluate); so true_torques 
+    # should be N-by-3, and decoder_torques should also be N-by-3:
+    error_tensor = (true_torques - decoder_torques).to(device)
+    def MSE(i: torch.Tensor) -> torch.Tensor:
+        return torch.mean(error_tensor[i,:]**2)
+    mse_tensor = (vw.vmap(MSE)(torch.arange(0,error_tensor.shape[0]))).to(device)   # this should yield a 1 dimensional tensor
+    return mse_tensor
+
+def compute_L2(encoder_forces: torch.FloatTensor) -> torch.FloatTensor:
+    # This loss function is meant to minimize the magnitude of the control allocator's commanded forces 
+    # based on predefined maximum values associated with each thruster. encoder_forces is expected to 
+    # be an N-by-5 tensor, where N is the number of samples:
+    sum_tensor = torch.zeros((encoder_forces.shape[0],), dtype=torch.float32).to(device)
+    for i in range(0, len(cmd_max)):
+        eval_tensor = torch.zeros((encoder_forces.shape[0], 2), dtype=torch.float32).to(device)
+        eval_tensor[:,0] = torch.abs(encoder_forces[:,i]) - cmd_max[i]
+        sum_tensor += torch.max(eval_tensor, dim=1)[0]
+    return sum_tensor
 
 def compute_L3():
+    # This loss function was originally meant to penalize large rate changes, but this doesn't apply for this 
+    # particular sample dataset
     pass
     
-def compute_L4():
-    pass
+def compute_L4(encoder_forces: torch.FloatTensor) -> torch.FloatTensor:
+    # This loss function is meant to minimize power consumption according to Johansen et al's "Constrained
+    # nonlinear control allocation with singularity avoidance using sequential quadratic programming".
+    # encoder_forces is expected to be an N-by-5 tensor, where N is the number of samples; but only the
+    # first 3 columns are used here so it's okay to slice before passing as an input argument:
+    power_tensor = torch.zeros((encoder_forces.shape[0],), dtype=torch.float32).to(device)
+    power_tensor += torch.abs(encoder_forces[:,0])**(3/2) + \
+        torch.abs(encoder_forces[:,1])**(3/2) + \
+        torch.abs(encoder_forces[:,2])**(3/2)
+    return power_tensor
     
-def compute_L5():
-    pass
+def compute_L5(encoder_forces: torch.FloatTensor) -> torch.FloatTensor:
+    # This loss function is meant to minimize the number of instances that the control allocator commands 
+    # the thrusters to operate within "inefficient" azimuth sectors. encoder_forces is expected to be an 
+    # N-by-5 tensor, where N is the number of samples:
+    def check_bottom_zone(i: torch.Tensor) -> torch.Tensor:
+        return ( (encoder_forces[:,i] < bad_az_bottom[1]) * (encoder_forces[:,i] > bad_az_bottom[0]) )
+    def check_top_zone(i: torch.Tensor) -> torch.Tensor:
+        return ( (encoder_forces[:,i] < bad_az_top[1]) * (encoder_forces[:,i] > bad_az_top[0]) )
+    bottom_zone = torch.sum(
+        (vw.vmap(check_bottom_zone)(torch.tensor([3,4], dtype=int))).reshape(-1,2).to(torch.float32),
+        axis=1).to(device)
+    top_zone = torch.sum(
+        (vw.vmap(check_top_zone)(torch.tensor([3,4], dtype=int))).reshape(-1,2).to(torch.float32),
+        axis=1).to(device)
+    return (bottom_zone + top_zone).to(device)
+
+def combined_Loss(L0: torch.FloatTensor,
+                  L1: torch.FloatTensor,
+                  L2: torch.FloatTensor,
+                  L4: torch.FloatTensor,
+                  L5: torch.FloatTensor) -> torch.FloatTensor:
+    # This function calculates the combined loss using the scale factors provided from the paper. 
+    # All input loss function tensors are expected to be 1 dimensional with the same number of 
+    # elements:
+    return ((k0*L0) + (k1*L1) + (k2*L2) + (k4*L4) + (k5*L5)).to(device)
+
+class AutoEncoder_LossFn(nn.Module):
+    def __init__(self):
+        super(AutoEncoder_LossFn, self).__init__()
+    def forward(self, true_torques: torch.FloatTensor, encoder_forces: torch.FloatTensor, decoder_torques: torch.FloatTensor) -> torch.FloatTensor:
+        loss0 = compute_L0(true_torques, encoder_forces)
+        loss1 = compute_L1(true_torques, decoder_torques)
+        loss2 = compute_L2(encoder_forces)
+        loss4 = compute_L4(encoder_forces)
+        loss5 = compute_L5(encoder_forces)
+        return torch.mean(combined_Loss(loss0, loss1, loss2, loss4, loss5)) # safe to take mean since L0 -> L5 were designed to yield only positive values
+
+def normalizeTorques(torque_tensor: torch.FloatTensor) -> torch.FloatTensor:
+    mu = torch.mean(torque_tensor, axis=1).reshape(-1,1).to(device)
+    sigma = (1/torque_tensor.shape[0])*((torque_tensor - mu)**2).to(device)
+    return ((torque_tensor - mu)/sigma).to(device)
 
 if __name__ == '__main__':
+    # NOTE: we don't need to recreate figures 9, 10, and 5
     print(f"Python Version = {sys.version}, Torch Device = {device}")
     # Generate datasets:
     test_tensor = randomWalkTensor(
@@ -214,11 +344,103 @@ if __name__ == '__main__':
     torque_tensor = forcesToTorques(test_tensor)
     T_train, T_validation, T_test = splitTrainValTest(torque_tensor.cpu().detach().numpy(), (0.7, 0.8), (True, False, False), 1)
     
-    # Configure the NN model:
-    model = AutoEncoder_LSTM()
+    # Configure the NN model and training parameters:
+    #model = AutoEncoder_LSTM()
+    model = AutoEncoder_FCN((30, 15), net_dropout=0.0)
+    optimizer = optim.SGD(model.parameters(), lr=0.01)
+    loss_fn = AutoEncoder_LossFn()
+    num_epochs = 10
+    batch_size = 1000
+    batch_start = torch.arange(0, T_train.shape[1], batch_size)
+    best_loss = np.inf
+    best_modelstate = None
+    training_log, validation_log, test_log = [], [], []     # each list entry should be a sub-list with losses: L0, L1, L2, L4, L5, Lcombined 
+
+    # Training Loop:
+    for epoch in range(0, num_epochs):
+        model.train()
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        for start in batch_start:
+            # Take a batch and perform forward pass:
+            T_batch = T_train[:,start:(start+batch_size)].T
+            # TODO: YOUR LOSSES ARE BLOWING UP - THINK YOU'LL NEED TO NORMALIZE THE INPUTS AND FIGURE OUT HOW TO MINIMIZE LOSSES:
+            print(f"{normalizeTorques(T_batch) = }")
+            model_outputs = model(normalizeTorques(T_batch))
+            encoder_outputs = model.encode(normalizeTorques(T_batch))
+            loss0 = torch.mean(compute_L0(T_batch, encoder_outputs))
+            loss1 = torch.mean(compute_L1(T_batch, model_outputs))
+            loss2 = torch.mean(compute_L2(encoder_outputs))
+            loss4 = torch.mean(compute_L4(encoder_outputs))
+            loss5 = torch.mean(compute_L5(encoder_outputs))
+            #print(f"{loss0=}, {loss1=}, {loss2=}, {loss4=}, {loss5=}")
+            loss_comb = loss_fn(T_batch, encoder_outputs, model_outputs)
+
+            # Store losses:
+            training_log.append([loss0.item(), loss1.item(), loss2.item(), loss4.item(), loss5.item(), loss_comb.item()])
+
+            # Perform backward pass:
+            optimizer.zero_grad()
+            loss_comb.backward()
+
+            # Update weights and print progress:
+            optimizer.step()
+            print(f"\tepoch: {epoch+1}/{num_epochs}, Batch {start//batch_size+1}/{len(batch_start)}, Loss: {loss_comb.item():.6f}")
+        
+        # At the end of each epoch, perform evaluation with the validation data:
+        model.eval()
+        with torch.no_grad():
+            model_outputs = model(normalizeTorques(T_validation.T))
+            encoder_outputs = model.encode(normalizeTorques(T_validation.T))
+            loss0 = torch.mean(compute_L0(T_validation, encoder_outputs))
+            loss1 = torch.mean(compute_L1(T_validation, model_outputs))
+            loss2 = torch.mean(compute_L2(encoder_outputs))
+            loss4 = torch.mean(compute_L4(encoder_outputs))
+            loss5 = torch.mean(compute_L5(encoder_outputs))
+            loss_comb = loss_fn(T_validation, encoder_outputs, model_outputs)
+            validation_log.append([loss0.item(), loss1.item(), loss2.item(), loss4.item(), loss5.item(), loss_comb.item()])
+            if (loss_comb.item() < best_loss):
+                best_loss = loss_comb.item()
+                best_modelstate = copy.deepcopy(model.state_dict())
+
+    # Once the training is complete, restore model to its "best state" and perform evaluation against test data:
+    print(f"{best_loss = :.2f}")
+    model.load_state_dict(best_modelstate)
+    model.eval()
+    final_model_outputs = model(normalizeTorques(T_test.T))
+    final_encoder_outputs = model.encode(normalizeTorques(T_test.T))
+    final_loss0 = compute_L0(T_validation, encoder_outputs)
+    final_loss1 = compute_L1(T_validation, model_outputs)
+    final_loss2 = compute_L2(encoder_outputs)
+    final_loss4 = compute_L4(encoder_outputs)
+    final_loss5 = compute_L5(encoder_outputs)
+    final_loss_comb = combined_Loss(final_loss0, final_loss1, final_loss2, final_loss4, final_loss5)
+
+    train_loss_s = util.LineStructure(x=np.arange(0, len(training_log)), y=np.array(training_log)[:,-1], label="Train")
+    val_loss_s = util.LineStructure(x=np.arange(0, len(validation_log)), y=np.array(validation_log)[:,-1], label="Validation")
+    test_loss_s = util.LineStructure(x=np.arange(0, final_loss_comb.shape[0]), y=final_loss_comb.cpu().detach().clone().numpy())
+    train_fig, train_ax = util.plotLineStructures([train_loss_s, val_loss_s], supertitle="Combined Training Loss")
+    test_fig, test_ax = util.plotLineStructures([test_loss_s], supertitle="Combined Test Loss")
+
+    """
     print(f"{model.encode(T_train[:,0:10].T) = }")
     print(f"{model.decode(test_tensor[:,0:10].T) = }")
-    print(f"{model(T_train[:,0:10].T) = }")
+    model_outputs = model(T_train[:,0:10].T)
+    encoder_outputs = model.encode(T_train[:,0:10].T)
+    print(f"{model_outputs = }")
+    print(f"{encoder_outputs = }")
+    Loss0 = compute_L0(torque_tensor[:,0:10].T, encoder_outputs)
+    Loss1 = compute_L1(torque_tensor[:,0:10].T, model_outputs)
+    Loss2 = compute_L2(encoder_outputs)
+    Loss4 = compute_L4(encoder_outputs)
+    Loss5 = compute_L5(encoder_outputs)
+    LossCombined = combined_Loss(Loss0, Loss1, Loss2, Loss4, Loss5)
+    print(f"{Loss0 = }")
+    print(f"{Loss1 = }")
+    print(f"{Loss2 = }")
+    print(f"{Loss4 = }")
+    print(f"{Loss5 = }")
+    print(f"{LossCombined = }")
+    """
 
     """
     # Create LineStructures for plotting:
