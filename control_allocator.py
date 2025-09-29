@@ -358,11 +358,11 @@ if __name__ == '__main__':
     # Configure the NN model and training parameters:
     #model = AutoEncoder_LSTM()
     model = AutoEncoder_FCN((60, 90, 30, 10), net_dropout=0.0)
-    optimizer = optim.Adam(model.parameters(), lr=0.001) #lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min")
     loss_fn = AutoEncoder_LossFn()
-    num_epochs = 100 #25
-    batch_size = 2000 #2000
+    num_epochs = 100
+    batch_size = 2000
     batch_start = torch.arange(0, T_train.shape[1], batch_size)
     best_loss = np.inf
     best_modelstate = None
