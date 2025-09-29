@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Report
+report/*
+!report/*.tex
+!report/*.pdf
+!report/*.png

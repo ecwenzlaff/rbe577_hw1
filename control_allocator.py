@@ -2,7 +2,7 @@
 # HW 1: Control Allocation via Deep Neural Networks
 # ecwenzlaff@wpi.edu
 
-import sys
+import sys, os
 from typing import Any, Tuple, Union # specified types (esp. those using "Any") primarily convey intention and are not guaranteed to work with static type checking libraries 
 import numpy as np
 import torch
@@ -19,12 +19,13 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 F1_bounds = (-1e4, 1e4)
 F2_bounds = (-5e3, 5e3)
 F3_bounds = (-5e3, 5e3)
-alpha2_bounds = (-180.0, 180.0)
-alpha3_bounds = (-180.0, 180.0)
+alpha2_bounds = (-180.0*(np.pi/180.0), 180.0*(np.pi/180.0))
+alpha3_bounds = (-180.0*(np.pi/180.0), 180.0*(np.pi/180.0))
 l1, l2, l3, l4 = -14.0, 14.5, -2.7, 2.7
-cmd_max = (3e4, 6e4, 6e4, 180.0, 180.0)
-bad_az_bottom, bad_az_top = (-100.0, -80.0), (80.0, 100.0)
-k0, k1, k2, k4, k5 = 10e0, 10e0, 10e-1, 10e-7, 10e-1    # k3 not included since it's associated with loss function for rate changes which don't apply to this sample set
+cmd_max = (3e4, 6e4, 6e4, 180.0*(np.pi/180.0), 180.0*(np.pi/180.0))
+bad_az_bottom, bad_az_top = (-100.0*(np.pi/180.0), -80.0*(np.pi/180.0)), (80.0*(np.pi/180.0), 100.0*(np.pi/180.0))
+k0, k1, k2, k4, k5 = 10e-9, 10e-9, 10e-1, 10e-7, 10e-1    # k3 not included since it's associated with loss function for rate changes which don't apply to this sample set
+outputdir = "outputs"
 
 def randomWalkTensor(tensorsize: Tuple[int, int], maxstepvector: torch.FloatTensor, initstate: torch.Tensor = None) -> torch.FloatTensor:
     # Input/output formatting anticipates state variables in rows and sampled states in columns:
@@ -82,14 +83,14 @@ def forcesToTorques(forcetensor: torch.FloatTensor) -> torch.FloatTensor:    # i
     #       [ 0,                    0,                                          0, 0, 0],
     #       [0,                     0,                                          0, 0, 0]
     #   ]
-    transform_tensor[:,0,1] = torch.cos((np.pi/180)*forcetensor[3,:].reshape(-1))
-    transform_tensor[:,0,2] = torch.cos((np.pi/180)*forcetensor[4,:].reshape(-1))
+    transform_tensor[:,0,1] = torch.cos(forcetensor[3,:].reshape(-1))
+    transform_tensor[:,0,2] = torch.cos(forcetensor[4,:].reshape(-1))
     transform_tensor[:,1,0] = 1.0
-    transform_tensor[:,1,1] = torch.sin((np.pi/180)*forcetensor[3,:].reshape(-1))
-    transform_tensor[:,1,2] = torch.sin((np.pi/180)*forcetensor[4,:].reshape(-1))
+    transform_tensor[:,1,1] = torch.sin(forcetensor[3,:].reshape(-1))
+    transform_tensor[:,1,2] = torch.sin(forcetensor[4,:].reshape(-1))
     transform_tensor[:,2,0] = l2
-    transform_tensor[:,2,1] = l1*torch.sin((np.pi/180)*forcetensor[3,:].reshape(-1)) - l3*torch.cos((np.pi/180)*forcetensor[3,:].reshape(-1))
-    transform_tensor[:,2,2] = l1*torch.sin((np.pi/180)*forcetensor[4,:].reshape(-1)) - l4*torch.cos((np.pi/180)*forcetensor[4,:].reshape(-1))
+    transform_tensor[:,2,1] = l1*torch.sin(forcetensor[3,:].reshape(-1)) - l3*torch.cos(forcetensor[3,:].reshape(-1))
+    transform_tensor[:,2,2] = l1*torch.sin(forcetensor[4,:].reshape(-1)) - l4*torch.cos(forcetensor[4,:].reshape(-1))
     # Even though I only care about a single slice, broadcasting here could blow up my GPU memory,
     # so I'll need to try using vmap or list comprehension to apply the 5x5 transform to each 5x1 column...
     # torque_tensor = (transform_tensor @ forcetensor)[0,0:3,0:3] 
@@ -189,22 +190,46 @@ class AutoEncoder_FCN(nn.Module):
             # Input Layer:
             nn.Linear(3, layer_outputs[0]), 
             nn.ReLU(),
+            #nn.BatchNorm1d(layer_outputs[0]),
             nn.Dropout(net_dropout),
-            # Hidden Layer:
+            # Hidden Layer 1:
             nn.Linear(layer_outputs[0], layer_outputs[1]),
             nn.ReLU(),
+            #nn.BatchNorm1d(layer_outputs[1]),
+            nn.Dropout(net_dropout),
+            # Hidden Layer 2:
+            nn.Linear(layer_outputs[1], layer_outputs[2]),
+            nn.ReLU(),
+            #nn.BatchNorm1d(layer_outputs[2]),
+            nn.Dropout(net_dropout),
+            # Hidden Layer 3:
+            nn.Linear(layer_outputs[2], layer_outputs[3]),
+            nn.ReLU(),
+            #nn.BatchNorm1d(layer_outputs[3]),
             nn.Dropout(net_dropout),
             # Output Layer:
-            nn.Linear(layer_outputs[1], 5)
+            nn.Linear(layer_outputs[3], 5)
         ).to(device)
         self.decoder_fcn = nn.Sequential(
             # Input Layer:
-            nn.Linear(5, layer_outputs[1]), 
+            nn.Linear(5, layer_outputs[3]),
             nn.ReLU(),
+            #nn.BatchNorm1d(layer_outputs[3]), 
             nn.Dropout(net_dropout),
-            # Hidden Layer:
+            # Hidden Layer 1:
+            nn.Linear(layer_outputs[3], layer_outputs[2]),
+            nn.ReLU(),
+            #nn.BatchNorm1d(layer_outputs[2]),
+            nn.Dropout(net_dropout),
+            # Hidden Layer 2:
+            nn.Linear(layer_outputs[2], layer_outputs[1]),
+            nn.ReLU(),
+            #nn.BatchNorm1d(layer_outputs[1]),
+            nn.Dropout(net_dropout),
+            # Hidden Layer 3:
             nn.Linear(layer_outputs[1], layer_outputs[0]),
             nn.ReLU(),
+            #nn.BatchNorm1d(layer_outputs[0]),
             nn.Dropout(net_dropout),
             # Output Layer:
             nn.Linear(layer_outputs[0], 3)
@@ -224,22 +249,7 @@ def compute_L0(true_torques: torch.FloatTensor, encoder_forces: torch.FloatTenso
     # true_torques and encoder_forces tensors are expected to have each row represent a unique state 
     # (so that individual vector components have their own column spanning rows equal to the number of 
     # samples to evaluate); so true_torques should be N-by-3, and encoder_forces should be N-by-5:
-    transform_tensor = torch.zeros((encoder_forces.shape[0],5,5), dtype=torch.float32).to(device)
-    # Just like the forcesToTorques() function, the transform from section 3.1, equation (6) will be used. 
-    # However, unlike the forcesToTorques() function, the transform is needed to convert from torques
-    # to forces, so a matrix inverse operation must take place (a Moore-Penrose psuedo-inverse matrix 
-    # operation is actually used instead for preventing exceptions raised by singular matrices): 
-    transform_tensor[:,0,1] = torch.cos((np.pi/180)*encoder_forces[:,3].reshape(-1))
-    transform_tensor[:,0,2] = torch.cos((np.pi/180)*encoder_forces[:,4].reshape(-1))
-    transform_tensor[:,1,0] = 1.0
-    transform_tensor[:,1,1] = torch.sin((np.pi/180)*encoder_forces[:,3].reshape(-1))
-    transform_tensor[:,1,2] = torch.sin((np.pi/180)*encoder_forces[:,4].reshape(-1))
-    transform_tensor[:,2,0] = l2
-    transform_tensor[:,2,1] = l1*torch.sin((np.pi/180)*encoder_forces[:,3].reshape(-1)) - l3*torch.cos((np.pi/180)*encoder_forces[:,3].reshape(-1))
-    transform_tensor[:,2,2] = l1*torch.sin((np.pi/180)*encoder_forces[:,4].reshape(-1)) - l4*torch.cos((np.pi/180)*encoder_forces[:,4].reshape(-1))
-    def inplacetransform(i: torch.Tensor) -> torch.Tensor:
-        return torch.matmul(torch.linalg.pinv(transform_tensor[i,:,:]), encoder_forces[i,:])    # using torch.linalg.pinv() instead of torch.inverse()
-    encoder_torques = (vw.vmap(inplacetransform)(torch.arange(0,encoder_forces.shape[0]))).to(device)
+    encoder_torques = (forcesToTorques(encoder_forces.T).to(device)).T
     error_tensor = (true_torques - encoder_torques[:,0:3]).to(device)
     def MSE(i: torch.Tensor) -> torch.Tensor:
         return torch.mean(error_tensor[i,:]**2)
@@ -323,8 +333,9 @@ class AutoEncoder_LossFn(nn.Module):
         return torch.mean(combined_Loss(loss0, loss1, loss2, loss4, loss5)) # safe to take mean since L0 -> L5 were designed to yield only positive values
 
 def normalizeTorques(torque_tensor: torch.FloatTensor) -> torch.FloatTensor:
-    mu = torch.mean(torque_tensor, axis=1).reshape(-1,1).to(device)
-    sigma = (1/torque_tensor.shape[0])*((torque_tensor - mu)**2).to(device)
+    mu = torch.mean(torque_tensor, axis=0).reshape(1,-1).to(device)
+    sigma = torch.sqrt((1/torque_tensor.shape[0])*(torch.sum((torque_tensor - mu)**2, dim=0))).to(device)
+    #sigma2 = torch.std(torque_tensor, dim=0)
     return ((torque_tensor - mu)/sigma).to(device)
 
 if __name__ == '__main__':
@@ -333,7 +344,7 @@ if __name__ == '__main__':
     # Generate datasets:
     test_tensor = randomWalkTensor(
         (5,int(1e6)), 
-        torch.tensor([100.0, 10.0, 10.0, 2.0, 2.0]).reshape(-1,1),
+        torch.tensor([100.0, 10.0, 10.0, 2.0*(np.pi/180.0), 2.0*(np.pi/180.0)]).reshape(-1,1),
         torch.tensor([
             random.uniform(F1_bounds[0], F1_bounds[1]),
             random.uniform(F2_bounds[0], F2_bounds[1]),
@@ -346,34 +357,35 @@ if __name__ == '__main__':
     
     # Configure the NN model and training parameters:
     #model = AutoEncoder_LSTM()
-    model = AutoEncoder_FCN((30, 15), net_dropout=0.0)
-    optimizer = optim.SGD(model.parameters(), lr=0.01)
+    model = AutoEncoder_FCN((60, 90, 30, 10), net_dropout=0.0)
+    optimizer = optim.Adam(model.parameters(), lr=0.001) #lr=0.001)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min")
     loss_fn = AutoEncoder_LossFn()
-    num_epochs = 10
-    batch_size = 1000
+    num_epochs = 100 #25
+    batch_size = 2000 #2000
     batch_start = torch.arange(0, T_train.shape[1], batch_size)
     best_loss = np.inf
     best_modelstate = None
-    training_log, validation_log, test_log = [], [], []     # each list entry should be a sub-list with losses: L0, L1, L2, L4, L5, Lcombined 
+    training_log, training_epoch_log, validation_log, test_log = [], [], [], []     # each list entry should be a sub-list with losses: L0, L1, L2, L4, L5, Lcombined 
 
     # Training Loop:
     for epoch in range(0, num_epochs):
+        last_loss_this_epoch = np.inf
         model.train()
         print(f"Epoch {epoch+1}/{num_epochs}")
         for start in batch_start:
             # Take a batch and perform forward pass:
             T_batch = T_train[:,start:(start+batch_size)].T
-            # TODO: YOUR LOSSES ARE BLOWING UP - THINK YOU'LL NEED TO NORMALIZE THE INPUTS AND FIGURE OUT HOW TO MINIMIZE LOSSES:
-            print(f"{normalizeTorques(T_batch) = }")
-            model_outputs = model(normalizeTorques(T_batch))
-            encoder_outputs = model.encode(normalizeTorques(T_batch))
+            model_outputs = model(T_batch) #T_batch) #normalizeTorques(T_batch))
+            encoder_outputs = model.encode(T_batch) #T_batch) #normalizeTorques(T_batch))
             loss0 = torch.mean(compute_L0(T_batch, encoder_outputs))
             loss1 = torch.mean(compute_L1(T_batch, model_outputs))
             loss2 = torch.mean(compute_L2(encoder_outputs))
             loss4 = torch.mean(compute_L4(encoder_outputs))
             loss5 = torch.mean(compute_L5(encoder_outputs))
-            #print(f"{loss0=}, {loss1=}, {loss2=}, {loss4=}, {loss5=}")
+            #print(f"{loss0=}\n {loss1=}\n {loss2=}\n {loss4=}\n {loss5=}")
             loss_comb = loss_fn(T_batch, encoder_outputs, model_outputs)
+            last_loss_this_epoch = loss_comb.item()
 
             # Store losses:
             training_log.append([loss0.item(), loss1.item(), loss2.item(), loss4.item(), loss5.item(), loss_comb.item()])
@@ -383,97 +395,90 @@ if __name__ == '__main__':
             loss_comb.backward()
 
             # Update weights and print progress:
+            #nn.utils.clip_grad_norm_(model.parameters(), 1e-3)
             optimizer.step()
-            print(f"\tepoch: {epoch+1}/{num_epochs}, Batch {start//batch_size+1}/{len(batch_start)}, Loss: {loss_comb.item():.6f}")
+            print(f"\tepoch: {epoch+1}/{num_epochs}, Batch {start//batch_size+1}/{len(batch_start)}, Loss: {loss_comb.item()}")
         
         # At the end of each epoch, perform evaluation with the validation data:
+        training_epoch_log.append(last_loss_this_epoch)
         model.eval()
         with torch.no_grad():
-            model_outputs = model(normalizeTorques(T_validation.T))
-            encoder_outputs = model.encode(normalizeTorques(T_validation.T))
-            loss0 = torch.mean(compute_L0(T_validation, encoder_outputs))
-            loss1 = torch.mean(compute_L1(T_validation, model_outputs))
+            model_outputs = model(T_validation.T) #T_validation.T) #normalizeTorques(T_validation.T))
+            encoder_outputs = model.encode(T_validation.T) #T_validation.T) #normalizeTorques(T_validation.T))
+            loss0 = torch.mean(compute_L0(T_validation.T, encoder_outputs))
+            loss1 = torch.mean(compute_L1(T_validation.T, model_outputs))
             loss2 = torch.mean(compute_L2(encoder_outputs))
             loss4 = torch.mean(compute_L4(encoder_outputs))
             loss5 = torch.mean(compute_L5(encoder_outputs))
-            loss_comb = loss_fn(T_validation, encoder_outputs, model_outputs)
+            loss_comb = loss_fn(T_validation.T, encoder_outputs, model_outputs)
             validation_log.append([loss0.item(), loss1.item(), loss2.item(), loss4.item(), loss5.item(), loss_comb.item()])
             if (loss_comb.item() < best_loss):
                 best_loss = loss_comb.item()
                 best_modelstate = copy.deepcopy(model.state_dict())
+        scheduler.step(loss_comb)
 
     # Once the training is complete, restore model to its "best state" and perform evaluation against test data:
+    #print(f"{best_modelstate = }")
     print(f"{best_loss = :.2f}")
     model.load_state_dict(best_modelstate)
     model.eval()
-    final_model_outputs = model(normalizeTorques(T_test.T))
-    final_encoder_outputs = model.encode(normalizeTorques(T_test.T))
-    final_loss0 = compute_L0(T_validation, encoder_outputs)
-    final_loss1 = compute_L1(T_validation, model_outputs)
-    final_loss2 = compute_L2(encoder_outputs)
-    final_loss4 = compute_L4(encoder_outputs)
-    final_loss5 = compute_L5(encoder_outputs)
+    final_model_outputs = model(T_test.T) #T_test.T) #normalizeTorques(T_test.T))
+    final_encoder_outputs = model.encode(T_test.T) #T_test.T) #normalizeTorques(T_test.T))
+    final_decoded_torques = (forcesToTorques(final_encoder_outputs.T)).T
+    final_loss0 = compute_L0(T_test.T, final_encoder_outputs)
+    final_loss1 = compute_L1(T_test.T, final_model_outputs)
+    final_loss2 = compute_L2(final_encoder_outputs)
+    final_loss4 = compute_L4(final_encoder_outputs)
+    final_loss5 = compute_L5(final_encoder_outputs)
     final_loss_comb = combined_Loss(final_loss0, final_loss1, final_loss2, final_loss4, final_loss5)
 
-    train_loss_s = util.LineStructure(x=np.arange(0, len(training_log)), y=np.array(training_log)[:,-1], label="Train")
+    test_tau1 = util.LineStructure(x=np.arange(0, T_test.shape[1]), y=T_test.cpu().detach().numpy()[0,:].reshape(-1,1), label="Tau1")
+    test_tau2 = util.LineStructure(x=np.arange(0, T_test.shape[1]), y=T_test.cpu().detach().numpy()[1,:].reshape(-1,1), label="Tau2")
+    test_tau3 = util.LineStructure(x=np.arange(0, T_test.shape[1]), y=T_test.cpu().detach().numpy()[2,:].reshape(-1,1), label="Tau3")
+    test_F1 = util.LineStructure(x=np.arange(0, final_encoder_outputs.shape[0]), y=(final_encoder_outputs.cpu().detach().numpy()[:,0]).reshape(-1,1), label="F1")
+    test_F2 = util.LineStructure(x=np.arange(0, final_encoder_outputs.shape[0]), y=(final_encoder_outputs.cpu().detach().numpy()[:,1]).reshape(-1,1), label="F2")
+    test_F3 = util.LineStructure(x=np.arange(0, final_encoder_outputs.shape[0]), y=(final_encoder_outputs.cpu().detach().numpy()[:,2]).reshape(-1,1), label="F3")
+    test_a2 = util.LineStructure(x=np.arange(0, final_encoder_outputs.shape[0]), y=((180.0/np.pi)*final_encoder_outputs.cpu().detach().numpy()[:,3]).reshape(-1,1), label="alpha2")
+    test_a3 = util.LineStructure(x=np.arange(0, final_encoder_outputs.shape[0]), y=((180.0/np.pi)*final_encoder_outputs.cpu().detach().numpy()[:,4]).reshape(-1,1), label="alpha3")
+    dec_tau1 = util.LineStructure(x=np.arange(0, final_decoded_torques.shape[0]), y=(final_decoded_torques.cpu().detach().numpy()[:,0]).reshape(-1,1), label="Tau1 (T*encoder)")
+    dec_tau2 = util.LineStructure(x=np.arange(0, final_decoded_torques.shape[0]), y=(final_decoded_torques.cpu().detach().numpy()[:,1]).reshape(-1,1), label="Tau2 (T*encoder)")
+    dec_tau3 = util.LineStructure(x=np.arange(0, final_decoded_torques.shape[0]), y=(final_decoded_torques.cpu().detach().numpy()[:,2]).reshape(-1,1), label="Tau3 (T*encoder)")
+    train_loss_s = util.LineStructure(x=np.arange(0, len(training_log)), y=np.array(training_log)[:,-1])
+    epoch_train_loss = util.LineStructure(x=np.arange(0, len(training_epoch_log)), y=np.array(training_epoch_log), label="Training")
     val_loss_s = util.LineStructure(x=np.arange(0, len(validation_log)), y=np.array(validation_log)[:,-1], label="Validation")
     test_loss_s = util.LineStructure(x=np.arange(0, final_loss_comb.shape[0]), y=final_loss_comb.cpu().detach().clone().numpy())
-    train_fig, train_ax = util.plotLineStructures([train_loss_s, val_loss_s], supertitle="Combined Training Loss")
-    test_fig, test_ax = util.plotLineStructures([test_loss_s], supertitle="Combined Test Loss")
+    test_loss0 = util.LineStructure(x=np.arange(0, final_loss0.shape[0]), y=final_loss0.cpu().detach().clone().numpy())
+    test_loss1 = util.LineStructure(x=np.arange(0, final_loss1.shape[0]), y=final_loss1.cpu().detach().clone().numpy())
+    test_loss2 = util.LineStructure(x=np.arange(0, final_loss2.shape[0]), y=final_loss2.cpu().detach().clone().numpy())
+    test_loss4 = util.LineStructure(x=np.arange(0, final_loss4.shape[0]), y=final_loss4.cpu().detach().clone().numpy())
+    test_loss5 = util.LineStructure(x=np.arange(0, final_loss5.shape[0]), y=final_loss5.cpu().detach().clone().numpy())
+    
+    tau_fig, tau_ax, _ = util.plotLineStructures([test_tau1, test_tau2, test_tau3], supertitle="Test Taus", xlabels=["Samples"], ylabels=["Torque [N*m]"])
+    forces_fig, forces_ax, _ = util.plotLineStructures([test_F1, test_F2, test_F3], supertitle="Test Encoder Forces", xlabels=["Samples"], ylabels=["Force [N]"])
+    transform1_fig, transform1_ax, _ = util.plotLineStructures([test_tau1, dec_tau1], supertitle="Test Input Tau1 vs Encoder Output", xlabels=["Samples"], ylabels=["Torque [N*m]"])
+    transform2_fig, transform2_ax, _ = util.plotLineStructures([test_tau2, dec_tau2], supertitle="Test Input Tau2 vs Encoder Output", xlabels=["Samples"], ylabels=["Torque [N*m]"])
+    transform3_fig, transform3_ax, _ = util.plotLineStructures([test_tau3, dec_tau3], supertitle="Test Input Tau3 vs Encoder Output", xlabels=["Samples"], ylabels=["Torque [N*m]"])
+    angles_fig, angles_ax, _ = util.plotLineStructures([test_a2, test_a3], supertitle="Test Encoder Angles", xlabels=["Samples"], ylabels=["Angle [degrees]"])
+    train_fig, train_ax, _ = util.plotLineStructures([train_loss_s], supertitle="Combined Training Loss", xlabels=["Mini Batches"], ylabels=["Loss"])
+    trval_fig, trval_ax, _ = util.plotLineStructures([epoch_train_loss, val_loss_s], supertitle="Combined Training vs Validation Loss", xlabels=["Epoch"], ylabels=["Loss"])
+    test_fig, test_ax, _ = util.plotLineStructures([test_loss_s], supertitle="Combined Test Loss", xlabels=["Samples"], ylabels=["Loss"])
+    losses_fig, losses_ax, _ = util.plotLineStructures([test_loss0, test_loss1, test_loss2, test_loss4, test_loss5], supertitle="Test Loss Components", splitview=(5,1), 
+                                                       xlabels=5*["Samples"], ylabels=["L0 Loss", "L1 Loss", "L2 Loss", "L4 Loss", "L5 Loss"])
 
-    """
-    print(f"{model.encode(T_train[:,0:10].T) = }")
-    print(f"{model.decode(test_tensor[:,0:10].T) = }")
-    model_outputs = model(T_train[:,0:10].T)
-    encoder_outputs = model.encode(T_train[:,0:10].T)
-    print(f"{model_outputs = }")
-    print(f"{encoder_outputs = }")
-    Loss0 = compute_L0(torque_tensor[:,0:10].T, encoder_outputs)
-    Loss1 = compute_L1(torque_tensor[:,0:10].T, model_outputs)
-    Loss2 = compute_L2(encoder_outputs)
-    Loss4 = compute_L4(encoder_outputs)
-    Loss5 = compute_L5(encoder_outputs)
-    LossCombined = combined_Loss(Loss0, Loss1, Loss2, Loss4, Loss5)
-    print(f"{Loss0 = }")
-    print(f"{Loss1 = }")
-    print(f"{Loss2 = }")
-    print(f"{Loss4 = }")
-    print(f"{Loss5 = }")
-    print(f"{LossCombined = }")
-    """
-
-    """
-    # Create LineStructures for plotting:
-    F1_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[0,:].reshape(-1,1), marker='.') 
-    F2_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[1,:].reshape(-1,1), marker='.')
-    F3_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[2,:].reshape(-1,1), marker='.')
-    alpha2_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[3,:].reshape(-1,1), marker='.')
-    alpha3_samples = util.LineStructure(x=np.arange(0,test_tensor.shape[1]), y=test_tensor.cpu().detach().numpy()[4,:].reshape(-1,1), marker='.')
-    tau1_samples = util.LineStructure(x=np.arange(0,torque_tensor.shape[1]), y=torque_tensor.cpu().detach().numpy()[0,:].reshape(-1,1))
-    tau2_samples = util.LineStructure(x=np.arange(0,torque_tensor.shape[1]), y=torque_tensor.cpu().detach().numpy()[1,:].reshape(-1,1))
-    tau3_samples = util.LineStructure(x=np.arange(0,torque_tensor.shape[1]), y=torque_tensor.cpu().detach().numpy()[2,:].reshape(-1,1))
-    train_samples_tau1 = util.LineStructure(x=np.arange(0,T_train.shape[1]), y=T_train.cpu().detach().numpy()[0,:], label="Tau1")
-    train_samples_tau2 = util.LineStructure(x=np.arange(0,T_train.shape[1]), y=T_train.cpu().detach().numpy()[1,:], label="Tau2")
-    train_samples_tau3 = util.LineStructure(x=np.arange(0,T_train.shape[1]), y=T_train.cpu().detach().numpy()[2,:], label="Tau3")
-    validate_samples_tau1 = util.LineStructure(x=np.arange(0,T_validation.shape[1]), y=T_validation.cpu().detach().numpy()[0,:], label="Tau1")
-    validate_samples_tau2 = util.LineStructure(x=np.arange(0,T_validation.shape[1]), y=T_validation.cpu().detach().numpy()[1,:], label="Tau2")
-    validate_samples_tau3 = util.LineStructure(x=np.arange(0,T_validation.shape[1]), y=T_validation.cpu().detach().numpy()[2,:], label="Tau3")
-    test_samples_tau1 = util.LineStructure(x=np.arange(0,T_test.shape[1]), y=T_test.cpu().detach().numpy()[0,:], label="Tau1")
-    test_samples_tau2 = util.LineStructure(x=np.arange(0,T_test.shape[1]), y=T_test.cpu().detach().numpy()[1,:], label="Tau2")
-    test_samples_tau3 = util.LineStructure(x=np.arange(0,T_test.shape[1]), y=T_test.cpu().detach().numpy()[2,:], label="Tau3")
-
-    # Generate plots:
-    fig_F1, ax_F1, _ = util.plotLineStructures([F1_samples], supertitle="F1")
-    fig_F2, ax_F2, _ = util.plotLineStructures([F2_samples], supertitle="F2")
-    fig_F3, ax_F3, _ = util.plotLineStructures([F3_samples], supertitle="F3")
-    fig_a2, ax_a2, _ = util.plotLineStructures([alpha2_samples], supertitle="alpha2")
-    fig_a3, ax_a3, _ = util.plotLineStructures([alpha3_samples], supertitle="alpha3")
-    fig_tau1, ax_tau1, _ = util.plotLineStructures([tau1_samples], supertitle="Tau1")
-    fig_tau2, ax_tau2, _ = util.plotLineStructures([tau2_samples], supertitle="Tau2")
-    fig_tau3, ax_tau3, _ = util.plotLineStructures([tau3_samples], supertitle="Tau3")
-    fig_train, ax_train, _ = util.plotLineStructures([train_samples_tau1, train_samples_tau2, train_samples_tau3], supertitle="Train", splitview=(3,1))
-    fig_val, ax_val, _ = util.plotLineStructures([validate_samples_tau1, validate_samples_tau2, validate_samples_tau3], supertitle="Validation")
-    fig_test, ax_test, _ = util.plotLineStructures([test_samples_tau1, test_samples_tau2, test_samples_tau3], supertitle="Test")
-    """
+    if (not os.path.exists(outputdir)):
+        os.makedirs(outputdir)
+    tau_fig.savefig(f"{outputdir}/tau_fig.png")
+    forces_fig.savefig(f"{outputdir}/forces_fig.png")
+    transform1_fig.savefig(f"{outputdir}/transform1_fig.png")
+    transform2_fig.savefig(f"{outputdir}/transform2_fig.png")
+    transform3_fig.savefig(f"{outputdir}/transform3_fig.png")
+    angles_fig.savefig(f"{outputdir}/angles_fig.png")
+    train_fig.savefig(f"{outputdir}/train_fig.png")
+    trval_fig.savefig(f"{outputdir}/trval_fig.png")
+    test_fig.savefig(f"{outputdir}/test_fig.png")
+    losses_fig.set_size_inches(8.0, 12.0)
+    losses_fig.savefig(f"{outputdir}/losses_fig.png")
+    with open(f"{outputdir}/best_model_params.txt","w") as txtout:
+        print(f"{best_modelstate}", file=txtout)
 
     plt.show()

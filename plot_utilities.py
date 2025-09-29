@@ -85,13 +85,13 @@ def plotLineStructures(lslist: List[LineStructure],
         linehandles.append(curr_line)
         # Format the current axis based on line structure contents and input arguments:
         if (xlabels != None): 
-            axref.set_xlabel(xlabels[i], fontweight='bold')
+            axref.set_xlabel(xlabels[int(ax_idx)], fontweight='bold')
         if (ylabels != None): 
-            axref.set_ylabel(ylabels[i], fontweight='bold')
+            axref.set_ylabel(ylabels[int(ax_idx)], fontweight='bold')
         if ((zlabels != None) and (threeDplot)):
-            axref.set_zlabel(zlabels[i], fontweight='bold')
+            axref.set_zlabel(zlabels[int(ax_idx)], fontweight='bold')
         if (subtitles != None): 
-            axref.set_title(subtitles[i])
+            axref.set_title(subtitles[int(ax_idx)])
         if (anylabels):
             axref.legend() # should capture all LineStructures ever written to the given 'ax' 
         axref.grid(enablegrid)
